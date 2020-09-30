@@ -1,0 +1,1205 @@
+---
+title: "Metaclustering RA - use all clusters"
+author: "Virginia S. Muir"
+date: "8/22/2018"
+output: pdf_document
+---
+
+## ============================
+## Load data & prep environment
+## ============================
+
+```{r set_up, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment with required packages
+
+library(ComplexHeatmap)
+library(circlize)
+library(tidyverse)
+library(rlang)
+library(ggthemes)
+library(viridis)
+library(psych)
+library(reshape2)
+library(RColorBrewer)
+library(grid)
+library(gridExtra)
+library(readxl)
+library(ggpubr)
+library(ggmosaic)
+library(hypergate)
+library(dendextend)
+
+setwd("~/Box/RA Cliff Metaclustering")
+
+# Session options
+options(stringsAsFactors = FALSE)
+linkage = "ward.D2" # complete = Mario's choice; average = pvclust default; ward.D2 = sigclust2 default
+distance = "euclidean" # manhattan = Mario's choice; cor = pvclust default; euclidean = sigclust2 default
+subject_subset = "all" # options are "HC"  "RA"  or "all"
+export_width = 600
+export_height = 600
+title_font_gp = gpar(fontface = "bold", fontsize = 15)
+marker_label_gp = gpar(fontsize = 13)
+legend_params = list()
+tmrs <- c("Aggrecan", "Cilp", "Enolase", "Vimentin_Fibrinogen", "Influenza", "None")
+tmr_shorthand <- list("Aggrecan" = "agg", "Cilp" = "cilp", "Enolase" = "eno", "Vimentin_Fibrinogen" = "vf", "Influenza" = "flu")
+markers <- c("CD45ra", "CD38", "CCR4", "CCR6", "CXCR3", "CCR7", "CD4")
+
+# Set up the ggplot default params
+theme_set(theme_bw(12) + 
+          theme(panel.grid.major = element_blank(), 
+                panel.grid.minor = element_blank(),
+                plot.title = element_text(size=15, face="bold", margin = margin(10,0,10,0)),
+                axis.text.x = element_text(angle=45, hjust = 1)))
+
+# set up filename prefixes and output folders with the data
+dir.create("Output")
+dir.create(file.path("Output", format(Sys.Date(), "%y%m%d")))
+dir.create(file.path("Output", format(Sys.Date(), "%y%m%d"), "heatmaps"))
+dir.create(file.path("Output", format(Sys.Date(), "%y%m%d"), "mosaic_plots"))
+dir.create(file.path("Output", format(Sys.Date(), "%y%m%d"), "dotplots"))
+dir.create(file.path("Output", format(Sys.Date(), "%y%m%d"), "hypergate_scheme"))
+
+fname_prefix_hmap <- file.path("Output", format(Sys.Date(), "%y%m%d"), "heatmaps", 
+                               paste0(format(Sys.Date(), "%y%m%d"), "-Zscores-perSubj-YellowCyan"))
+fname_prefix_mosaic <- file.path("Output", format(Sys.Date(), "%y%m%d"), "mosaic_plots", 
+                                                 format(Sys.Date(), "%y%m%d"))
+fname_prefix_dotplot <- file.path("Output", format(Sys.Date(), "%y%m%d"), "dotplots", 
+                                                 format(Sys.Date(), "%y%m%d"))
+fname_prefix_hgate = file.path("Output", format(Sys.Date(), "%y%m%d"), 
+                               "hypergate_scheme", "mc")
+
+```
+
+
+```{r get_shared_data}
+
+# load data frame from Virginia, clustered using RPhenograph
+load("All_phenograph_tSNE_data.RData")
+subj_disease <- read_csv("subject_disease_status.csv")
+
+RPtmr_counting$RPclust <- as.character(RPtmr_counting$RPclust)
+RPtmr_counting = left_join(RPtmr_counting, RP_mean, by = c("samp", "RPclust"))
+
+selection = subject_subset
+if(subject_subset != "all"){
+  RPtmr_counting = RPtmr_counting[RPtmr_counting$samp %in% subj_disease$subj[subj_disease$disease == subject_subset],]
+  mergedExpr = mergedExpr[mergedExpr$samp %in% subj_disease$subj[subj_disease$disease == subject_subset],]
+  RP_mean = RP_mean[RP_mean$samp %in% subj_disease$subj[subj_disease$disease == subject_subset],]
+}
+
+
+event_check = as.data.frame(table(mergedExpr$samp))
+tmr_check_pre = mergedExpr %>% 
+  group_by(samp) %>%
+  count(tmr_pos)
+  
+df_phenograph <- RPtmr_counting
+mergedExpr = mergedExpr %>% 
+  mutate(RPclust = as.character(RPclust))
+
+# Identify low abundance clusters (containing <1% of events per subject) 
+df_phenograph = df_phenograph %>% 
+  dplyr::group_by(samp) %>% 
+  dplyr::mutate(total_events = sum(clust_size)) %>% 
+  ungroup() %>% 
+  mutate(pct_cells_in_clust = clust_size/total_events*100, 
+         keep = pct_cells_in_clust >= 1)
+ 
+# Filter out low abundance clusters (do this after calculating z-scores??)
+drop = dplyr::filter(df_phenograph, keep == F) %>%
+  dplyr::select(samp, RPclust)
+
+df_phenograph %<>% anti_join(drop)
+mergedExpr %<>% anti_join(drop)
+RP_mean %<>% anti_join(drop)
+
+tmr_check_post = mergedExpr %>% 
+  group_by(samp) %>%
+  count(tmr_pos)
+
+# Compute the per-subject standard deviation so that I can later compute z-score
+# Code based on Virginia's code for computing RP_mean and RP_median
+RP_sd <- aggregate(. ~ RPclust + samp, data = mergedExpr[,c(1:13, 15)], sd)
+RP_sd = rbind(RP_sd, data.frame(RPclust = "Total_CD4", aggregate(. ~ samp, data = mergedExpr[,c(1:13)], sd)))
+
+# format mean/var data for ease of use
+sample_means <- 
+  melt(RP_mean %>% 
+         dplyr::filter(RPclust == "Total_CD4") %>% 
+         dplyr::select(-RPclust, -Agg.Tmr, -Flu.Tmr, -Eno.Tmr, -Cilp.Tmr, -VF.Tmr, -CD4)) %>%
+  plyr::rename(c("samp" = "subject", "variable" = "marker", "value" = "subject_mean"))
+sample_sds <-
+  melt(RP_sd %>% dplyr::filter(RPclust == "Total_CD4") %>% 
+         dplyr::select(-RPclust, -Agg.Tmr, -Flu.Tmr, -Eno.Tmr, -Cilp.Tmr, -VF.Tmr, -CD4)) %>%
+  plyr::rename(c("samp" = "subject", "variable" = "marker", "value" = "subject_sd"))
+df_mean_var <-
+  merge(sample_means, sample_sds, by = c("subject", "marker")) %>%
+  mutate(subject_var = subject_sd **2) 
+
+```
+
+```{r set_colors, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Set up a palette for the heatmap
+my_zscore_pal <- colorRamp2(c(-2,0,2), c("#00ffffFF", "#000000FF", "#FDE725FF"))
+
+# get subject ids, assign colors to them
+subject_ids <- sort(unique(df_phenograph$samp))
+subject_id_colors <- data.frame(subject = subject_ids,
+                                #color = rainbow(length(subject_ids)))
+                                color = c("#000000FF",
+                                  plasma(length(subject_ids)+2)[4:(length(subject_ids)+2)]))
+
+pass_threshold_colors <- data.frame(pass = c(T,F), color = c("#FF0000", "#888888"))
+
+# Establish color palettes for cluster colors
+cb_pal <- colorblind_pal()(8)
+tol_cb_pal <- setNames(c("#332288", "#117733", "#30B595", "#88CCEE", 
+                "#DDCC77", "#CC6677", "#AA4499", "#882255"),
+                as.character(1:8))
+vm_pal <- cb_pal[-1] 
+
+```
+
+## ==========================================================================
+## Gather all clusters from all subjects (both containing and excluding Tmrs)
+## ==========================================================================
+
+```{r get_all_cluster_data}
+
+# prepare data for each tmr
+df_sig_list <- list()
+hmap_df_list <- list()
+persub_zscore_list <- list()
+for (t in tmrs){
+  # filter out clusters with no Tmr+ cells
+  df_sig_list[[t]] <-
+    df_phenograph %>%
+    plyr::rename(c("samp" = "subject")) %>%
+    dplyr::filter_(paste0(t, " > 0"))
+
+  # set up data frames for plotting
+  hmap_df_list[[t]] <-
+    df_sig_list[[t]] %>%
+    dplyr::select(subject, RPclust, one_of(markers)) %>%
+    melt(id.vars = c("subject", "RPclust")) %>% 
+    plyr::rename(c("variable" = "marker", "value" =  "mean")) %>%
+    merge(df_mean_var, by=c("subject", "marker")) %>%
+    mutate(zscore_persub = (mean - subject_mean)/subject_sd,
+           sample = paste0(.$subject, "_", .$RPclust)) %>%
+    dplyr::select(marker, zscore_persub, sample)
+  
+  # Extract the z-scores
+  persub_zscore_list[[t]] <-
+    hmap_df_list[[t]] %>%
+    dcast(marker ~ sample, value.var = "zscore_persub") %>%
+    set_rownames(.$marker) %>%
+    dplyr::select(-marker)
+}
+```
+
+
+```{r get_all_tmr_clusters_data}
+
+# load expression data, select all unique clusters 
+df_all_tmr <- NULL
+for (t in tmrs){
+  df_all_tmr <- rbind(df_all_tmr, df_sig_list[[t]]) %>% unique
+}
+
+# set up data frames for plotting by selecting clusters containing Tmr+ cells
+tmrs = c("Aggrecan", "Cilp", "Enolase", "Vimentin_Fibrinogen", "Influenza")
+tmrs = c("Aggrecan", "Cilp", "Enolase", "Vimentin_Fibrinogen")
+
+clust_sig_pass <-
+  df_all_tmr %>%
+  dplyr::select(subject, RPclust, tmrs) %>%
+  mutate(sample = paste0(.$subject, "_", .$RPclust))
+
+
+## Include to show % of Tmrs/Specificity present in a cluster for each individual 
+clust_sig_pass %<>% group_by(subject) %>%
+  mutate(tot_Aggrecan = sum(Aggrecan), tot_Cilp = sum(Cilp),
+         tot_Enolase = sum(Enolase), tot_Vimentin_Fibrinogen = sum(Vimentin_Fibrinogen)) %>%
+  ungroup() %>%
+  mutate(pass_thresh_Aggrecan = Aggrecan/tot_Aggrecan, pass_thresh_Cilp = Cilp/tot_Cilp,
+         pass_thresh_Enolase = Enolase/tot_Enolase, 
+         pass_thresh_Vimentin_Fibrinogen = Vimentin_Fibrinogen/tot_Vimentin_Fibrinogen)
+
+test = function(column){
+  column = ifelse(is.na(column), 0.00,
+                  ifelse(column < 0.005, 0.00,
+                         round(column, digits = 2)))
+}
+
+clust_sig_pass[,12:15] %<>% sapply(test)
+
+clust_sig_pass %<>% dplyr::select(sample, contains("pass_thresh"))
+
+hmap_df_all_tmr <- 
+  df_all_tmr %>%
+  dplyr::select(subject, RPclust, one_of(markers)) %>% 
+  melt(id.vars = c("subject", "RPclust")) %>% 
+  dplyr::rename(marker = variable, mean = value) %>%
+  merge(df_mean_var, by=c("subject", "marker")) %>%
+  mutate(zscore_persub = (mean - subject_mean)/subject_sd,
+         sample = paste0(.$subject, "_", .$RPclust)) %>%
+  dplyr::select(sample, subject, marker, zscore_persub) %>%
+  merge(clust_sig_pass, by="sample")
+ 
+# Extract the z-scores for all subjects
+all_tmr_all_sub_persub_zscores <-
+  hmap_df_all_tmr %>%
+  dcast(marker ~ sample, value.var = "zscore_persub") %>%
+  set_rownames(.$marker) %>%
+  dplyr::select(-marker)
+
+# extract the z-scores for each subject, and mark which clusters pass the threshold
+all_tmr_persub_zscores <- list()
+for (s in unique(hmap_df_all_tmr$subject)){
+  all_tmr_persub_zscores[[s]] <- 
+    hmap_df_all_tmr %>%
+    dplyr::filter(subject == s) %>%
+    dcast(marker ~ sample, value.var = "zscore_persub") %>%
+    set_rownames(.$marker) %>%
+    dplyr::select(-marker)
+}
+
+```
+
+
+## =======================================
+## Create heatmap and metacluster the data
+## =======================================
+
+
+```{r enriched_cluster_zscore_hmap_by_tmr_mario}
+
+all_tmr_zscore_anno_df <- 
+  hmap_df_all_tmr %>% 
+  dplyr::select(sample, contains("pass_thresh_")) %>%
+  unique %>%
+  dplyr::slice(match(colnames(all_tmr_all_sub_persub_zscores), .$sample)) %>% 
+  mutate(sample = str_replace(.$sample, "_[0-9]+$", "")) %>%
+  dplyr::rename(subject = sample)
+colnames(all_tmr_zscore_anno_df) %<>% str_replace_all("pass_thresh_", "") 
+
+my_hm <- Heatmap(all_tmr_all_sub_persub_zscores %>% as.matrix(),
+          clustering_method_columns = linkage,
+          clustering_method_rows = linkage)
+  
+# cut the dendrogram to get phenotypic metaclusters
+
+n_metaclusters = 8
+col_clust <- as.hclust(column_dend(my_hm))
+col_indices <- cutree(col_clust, k = n_metaclusters)
+mc1_clusts = names(which(col_indices == 1))
+mc2_clusts = names(which(col_indices == 2))
+mc3_clusts = names(which(col_indices == 3))
+mc4_clusts = names(which(col_indices == 4))
+mc5_clusts = names(which(col_indices == 5))
+mc6_clusts = names(which(col_indices == 6))
+mc7_clusts = names(which(col_indices == 7))
+mc8_clusts = names(which(col_indices == 8))
+
+# Hack for more-readable color order
+col_indices[mc3_clusts] = 1
+col_indices[mc6_clusts] = 2
+col_indices[mc4_clusts] = 3 
+col_indices[mc7_clusts] = 4 
+col_indices[mc1_clusts] = 5 
+col_indices[mc2_clusts] = 6
+col_indices[mc8_clusts] = 7 
+col_indices[mc5_clusts] = 8
+            
+#ordered_indices <- col_indices[column_order(my_hm)]
+k_groups <- length(unique(col_indices))
+  
+# set up colors as a named list
+all_tmr_zscore_anno_colors <- list(subject = setNames(subject_id_colors$color,
+                                                as.character(subject_id_colors$subject)),
+                                   group = tol_cb_pal)
+
+## Use for pct tmrs color scheme
+# for (t in tmrs){
+#   tmr_vect = all_tmr_zscore_anno_df %>% dplyr::select(t) %>% unlist(use.names = FALSE)
+#   all_tmr_zscore_anno_colors[[t]] = c(setNames("white", 0), 
+#                                       setNames(colorRampPalette(c("grey95", "grey0"))(100), 
+#                                                seq(0.01, 1.00, 0.01)))
+#   # all_tmr_zscore_anno_colors[[t]] = c(setNames("white", 0.00), setNames(colorRampPalette(brewer.pal(9, "Reds")[2:9])(100),
+#   #                          seq(0.01, 1.00, .01)))
+# }
+
+
+all_tmr_zscore_anno_df = data.frame(# subject = all_tmr_zscore_anno_df[,1], 
+                                    group = col_indices) #, 
+                             # all_tmr_zscore_anno_df[,2:length(all_tmr_zscore_anno_df)])
+
+all_tmr_zscore_anno <- 
+  HeatmapAnnotation(
+    df = data.frame(all_tmr_zscore_anno_df),
+    col = all_tmr_zscore_anno_colors,
+    show_annotation_name = T,
+    show_legend = T)
+
+## The new R installation/heatmap update changed the rotation of my plot.  This is the patch.
+column_dend = col_clust %>%
+  labels 
+
+mc8_start = which(column_dend == "1b_018_12")
+mc8_end = which(column_dend == "1a_021_12")
+   
+rotating_index = column_dend[c(mc8_start:mc8_end, 1:(mc8_start-1))] %>%
+  rev()
+
+rotated_dend = col_clust %>%
+  rotate(rotating_index)
+  
+# Plot heatmap
+png(filename = paste0(fname_prefix_hmap, "_", linkage, "_", distance, "_", 
+                      subject_subset, "_AllClusters_cutree", n_metaclusters, ".png"),
+    width = 8.33,
+    height = 8.33,
+    units = "in",
+    res = 300)
+print(Heatmap(all_tmr_all_sub_persub_zscores %>% as.matrix(),
+        col = my_zscore_pal,
+        name = "Z-score",
+        column_title = paste0("Cluster Phenotypes from ", subject_subset, " Subjects"),
+        column_title_gp = title_font_gp,
+        clustering_method_columns = linkage,
+        cluster_columns = rotated_dend,
+        row_order = c("CD45ra", "CD38", "CCR7", "CXCR3", "CCR4", "CCR6"), 
+        cluster_rows = FALSE,
+        show_column_names = F,
+        row_names_gp = marker_label_gp,
+        top_annotation = all_tmr_zscore_anno,
+        heatmap_legend_param = legend_params))
+dev.off()
+
+``` 
+
+## =================================
+## Prep data for plotting & analysis
+## =================================
+
+
+```{r clinical_queries}
+mc_assignments = all_tmr_zscore_anno_df %>% 
+  rownames_to_column("samp") %>%
+  dplyr::select(samp, metacluster = group) %>%
+  mutate(metacluster = factor(metacluster, levels = c(1:8)))
+
+# Import & tidy clinical characteristics from Cliff
+load("20191210_combined_phenos.RData")
+phenos <- abbrev_phenos
+
+
+# Create object showing counts and proportions of Tmr-specific and total CD4+ cells with clinical characteristics
+tmr_counting = df_all_tmr %>% 
+  dplyr::select(subject, RPclust, clust_size, tmrs, Influenza, None) %>%
+  mutate(samp = paste(subject, RPclust, sep = "_")) %>%
+  left_join(mc_assignments) %>%
+  group_by(subject, metacluster) %>%
+  summarize_at(c(tmrs, "Influenza", "None", "clust_size"), sum) %>%
+  complete(subject, metacluster, fill = list(Aggrecan = 0, Cilp = 0, Enolase = 0, Vimentin_Fibrinogen = 0, 
+                                             Influenza = 0, None = 0, clust_size = 0)) %>%
+  group_by(subject) %>% 
+  mutate(subj_agg = sum(Aggrecan), subj_cilp = sum(Cilp), subj_eno = sum(Enolase), subj_vf = sum(Vimentin_Fibrinogen), 
+         subj_flu = sum(Influenza), subj_CD4 = sum(clust_size)) %>% 
+  ungroup() %>% 
+  mutate(pct_agg = Aggrecan/subj_agg, pct_cilp = Cilp/subj_cilp, pct_eno = Enolase/subj_eno, pct_vf = Vimentin_Fibrinogen/subj_vf, 
+         pct_flu = Influenza/subj_flu, pct_CD4 = clust_size/subj_CD4) %>%
+  dplyr::select(-starts_with("subj_")) %>%
+  left_join(phenos, by = c("subject" = "subj")) %>%
+  mutate(group = ifelse(disease_status == "HC", "HC", 
+                        ifelse(duration_cat == "Long standing", "LS",
+                               ifelse(duration_cat == "Recent onset", "RO", "HELP!"))),
+         duration_yrs = duration_cont) 
+
+
+forTee = mergedExpr %>% 
+  dplyr::select(samp, tmr_pos, RPclust) %>% 
+  mutate(subj = samp, 
+         samp = paste(samp, RPclust, sep = "_"),
+         specificity = case_when(tmr_pos == "none" ~ "none",
+                                 tmr_pos == "flu" ~ "Influenza",
+                                 tmr_pos == "agg" ~ "Aggrecan",
+                                 tmr_pos == "eno" ~ "Enolase",
+                                 tmr_pos == "cilp" ~ "Cilp",
+                                 tmr_pos == "vf" ~ "Vim-Fib") %>% 
+           factor(levels = c("Aggrecan", "Cilp", "Enolase", "Vim-Fib", "Influenza"))) %>% 
+  left_join(mc_assignments) %>% 
+  dplyr::select(subj, tmr_pos, pheno_cat = metacluster, specificity)
+write_csv(forTee, path = file.path("Output", format(Sys.Date(), "%y%m%d"), "heatmaps", 
+                               paste0(format(Sys.Date(), "%y%m%d"), 
+                                      "all_events_with_categorical_phenotypes.csv")))
+
+forValidation = mergedExpr %>% 
+  dplyr::select(samp, RPclust, clust_markers) %>% 
+  mutate(subj = samp, 
+         samp = paste(samp, RPclust, sep = "_")) %>% 
+  left_join(mc_assignments) %>% 
+  dplyr::rename(CD45RA = CD45ra,
+                pheno_cat = metacluster) 
+write_csv(forValidation, path = file.path("Output", format(Sys.Date(), "%y%m%d"), "heatmaps", 
+                               paste0(format(Sys.Date(), "%y%m%d"), 
+                                      "all_events_mcs_&_expression.csv")))
+
+tmr_by_subj = tmr_counting %>%
+  dplyr::select(subject, tmrs, Influenza, None, Total = clust_size) %>%
+  group_by(subject) %>%
+  summarise_all(sum) %>%
+  dplyr::rename(Aggrecan_tot = Aggrecan, Cilp_tot = Cilp, Enolase_tot = Enolase, 
+         Vimentin_Fibrinogen_tot = Vimentin_Fibrinogen, Influenza_tot = Influenza, None_tot = None)
+
+for_logistic_models = tmr_counting %>% 
+  dplyr::select(-c(pct_agg:duration_yrs)) %>%
+  dplyr::rename(Aggrecan_in_MC = Aggrecan, Cilp_in_MC = Cilp, Enolase_in_MC = Enolase, 
+                Vimentin_Fibrinogen_in_MC = Vimentin_Fibrinogen, Influenza_in_MC = Influenza, 
+                NonSpec_in_MC = None, Cells_in_MC = clust_size) %>%
+  left_join(tmr_by_subj) %>%
+  dplyr::rename(NonSpec_tot = None_tot, Cells_tot = Total) %>%
+  arrange(subject, metacluster)
+write_csv(for_logistic_models,  path = file.path("Output", format(Sys.Date(), "%y%m%d"), "heatmaps", 
+                                                 paste0(format(Sys.Date(), "%y%m%d"),
+                                      "metacluster_counts_for_modeling.csv")))
+```
+
+
+```{r id_subject_numbers_for_specificity_predominance}
+predominance_test = tmr_by_subj %>%
+  left_join(subj_disease, by = c("subject" = "subj")) %>%
+  dplyr::filter(disease == "RA") %>%
+  mutate(RA_tot = Aggrecan_tot + Cilp_tot + Enolase_tot + Vimentin_Fibrinogen_tot,
+         pct_agg = Aggrecan_tot/RA_tot,
+         pct_cilp = Cilp_tot/RA_tot,
+         pct_eno = Enolase_tot/RA_tot,
+         pct_vf = Vimentin_Fibrinogen_tot/RA_tot) 
+
+predom_agg = predominance_test %>%
+  dplyr::filter(pct_agg >= 0.4,
+                pct_agg > pct_cilp,
+                pct_agg > pct_eno,
+                pct_agg > pct_vf,
+                Aggrecan_tot > Cilp_tot + 1,
+                Aggrecan_tot > Enolase_tot + 1,
+                Aggrecan_tot > Vimentin_Fibrinogen_tot + 1) # %>%
+  # nrow
+
+predom_cilp = predominance_test %>%
+  dplyr::filter(pct_cilp >= 0.4,
+                pct_cilp > pct_agg,
+                pct_cilp > pct_eno,
+                pct_cilp > pct_vf,
+                Cilp_tot > Aggrecan_tot + 1,
+                Cilp_tot > Enolase_tot + 1,
+                Cilp_tot > Vimentin_Fibrinogen_tot + 1) # %>%
+  # nrow
+
+
+predom_eno = predominance_test %>%
+  dplyr::filter(pct_eno >= 0.4,
+                pct_eno > pct_cilp,
+                pct_eno > pct_agg,
+                pct_eno > pct_vf,
+                Enolase_tot > Cilp_tot + 1,
+                Enolase_tot > Aggrecan_tot + 1,
+                Enolase_tot > Vimentin_Fibrinogen_tot + 1) # %>%
+  # nrow
+
+
+predom_vf = predominance_test %>%
+  dplyr::filter(pct_vf >= 0.4,
+                pct_vf > pct_cilp,
+                pct_vf > pct_eno,
+                pct_vf > pct_agg,
+                Vimentin_Fibrinogen_tot > Cilp_tot + 1,
+                Vimentin_Fibrinogen_tot > Enolase_tot + 1,
+                Vimentin_Fibrinogen_tot > Aggrecan_tot + 1) # %>%
+  # nrow
+
+spec_test = bind_rows(agg = predom_agg, cilp = predom_cilp, eno = predom_eno, vf = predom_vf, 
+                 .id = "predominant_spec") %>% 
+  left_join(phenos %>% 
+              dplyr::rename(subject = subj))
+
+chisq.test(table(spec_test$predominant_spec, spec_test$rapid3_cat))
+chisq.test(table(spec_test$predominant_spec, spec_test$duration_cat))
+
+```
+
+
+##============================================
+## Plots cell distribution across metaclusters
+##============================================
+
+```{r all_subject_mosaics}
+# Reset ggplot defaults to match GLM figs
+theme_set(theme_classic(10) + 
+            theme(axis.title = element_text(size=10, face="bold"),
+                  axis.text.x = element_text(size=10, face="bold", color = "black"),
+                  axis.text.y = element_text(size=8, color = "black")))
+
+
+total_tmr_mosaic = forTee %>%
+  dplyr::filter( subj %in% tmr_by_subj$subject[(tmr_by_subj$Aggrecan_tot >= 8) |
+                                                (tmr_by_subj$Enolase_tot >= 8) |
+                                                (tmr_by_subj$Cilp_tot >= 8) |
+                                                (tmr_by_subj$Vimentin_Fibrinogen_tot >= 8) |
+                                                (tmr_by_subj$Influenza_tot >= 8)],
+                !(tmr_pos == "none"))
+
+#### All subject per-specificity cluster mosaic
+ggplot(data = total_tmr_mosaic, aes(x = specificity, fill = pheno_cat)) +
+  geom_bar(position = "fill") +
+  labs(y = "", x = "", title='Tmr+ phenotypes from all subjects') +
+  scale_fill_manual("Aligned Cluster", values = tol_cb_pal) +
+  theme(plot.title = element_text(hjust = 0.5),
+  axis.text.y = element_blank(),
+  axis.ticks.y = element_blank())
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_summary_of_all_tmrs.png"), 
+       width = 9, height = 6, dpi = "print")
+
+## Chi square test an all clusters/all specificities
+chisq.test(total_tmr_mosaic$pheno_cat, total_tmr_mosaic$specificity)
+DescTools::Lambda(total_tmr_mosaic$pheno_cat, total_tmr_mosaic$specificity, direction = "row")
+
+
+
+## Chi square test an all clusters/RA specificities
+RA_tmr_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[(tmr_by_subj$Aggrecan_tot >= 8) | 
+                                                (tmr_by_subj$Enolase_tot >= 8) | 
+                                                (tmr_by_subj$Cilp_tot >= 8) | 
+                                                (tmr_by_subj$Vimentin_Fibrinogen_tot >= 8)],
+                !(tmr_pos %in% c("none", "flu"))) %>%
+  droplevels()
+
+chisq.test(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity)
+DescTools::Lambda(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity, direction = "row")
+
+table(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity) %>% 
+  as.matrix() %>%
+  chisq.test() %>%
+  .$p.value
+table(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity) %>% 
+  as.matrix() %>%
+  .[,c(1,2)] %>%
+  chisq.test() %>%
+  .$p.value
+table(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity) %>% 
+  as.matrix() %>%
+  .[,c(1,3)] %>%
+  chisq.test() %>%
+  .$p.value
+table(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity) %>% 
+  as.matrix() %>%
+  .[,c(1,4)] %>%
+  chisq.test() %>%
+  .$p.value
+table(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity) %>% 
+  as.matrix() %>%
+  .[,c(2,3)] %>%
+  chisq.test() %>%
+  .$p.value
+table(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity) %>% 
+  as.matrix() %>%
+  .[,c(2,4)] %>%
+  chisq.test() %>%
+  .$p.value
+table(RA_tmr_mosaic$pheno_cat, RA_tmr_mosaic$specificity) %>% 
+  as.matrix() %>%
+  .[,c(3,4)] %>%
+  chisq.test() %>%
+  .$p.value
+
+#### Aggrecan per-subj stacked bar plot
+agg_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Aggrecan_tot >= 8],
+                tmr_pos == "agg") %>%
+  left_join(phenos %>% dplyr::select(subj, duration_cont))
+
+ggplot(data = agg_mosaic, aes(x = subj, fill = pheno_cat)) +
+    geom_bar(position = "fill") +
+    labs(y = "", x = "Subject ", title='Aggrecan-specific cells\nfrom subjects with \u2265 8 cells') +
+    scale_fill_manual("Aligned Cluster", values = all_tmr_zscore_anno_colors$group) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_aggrecan_mosaic.png"), 
+       width = 7.5, height = 6, dpi = "print")
+
+#### Enolase per-subj stacked bar plot
+eno_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Enolase_tot >= 8],
+                tmr_pos == "eno") 
+
+ggplot(data = eno_mosaic, aes(x = subj, fill = pheno_cat)) +
+    geom_bar(position = "fill") +
+    labs(y = "", x = "Subject ", title='Enolase-specific cells\nfrom subjects with \u2265 8 cells') +
+    scale_fill_manual("Aligned Cluster", values = all_tmr_zscore_anno_colors$group) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_enolase_mosaic.png"), 
+       width = 7.5, height = 6, dpi = "print")
+
+#### Cilp per-subj stacked bar plot
+cilp_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Cilp_tot >= 8],
+                tmr_pos == "cilp") 
+
+ggplot(data = cilp_mosaic, aes(x = subj, fill = pheno_cat)) +
+    geom_bar(position = "fill") +
+    labs(y = "", x = "Subject ", title='CILP-specific cells\nfrom subjects with \u2265 8 cells') +
+    scale_fill_manual("Aligned Cluster", values = all_tmr_zscore_anno_colors$group) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_cilp_mosaic.png"), 
+       width = 7.5, height = 6, dpi = "print")
+
+#### VimFib per-subj stacked bar plot
+vf_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Vimentin_Fibrinogen_tot >= 8],
+                tmr_pos == "vf") 
+
+ggplot(data = vf_mosaic, aes(x = subj, fill = pheno_cat)) +
+    geom_bar(position = "fill") +
+    labs(y = "", x = "Subject ", title='Vim/Fib-specific cells\nfrom subjects with \u2265 8 cells') +
+    scale_fill_manual("Aligned Cluster", values = all_tmr_zscore_anno_colors$group) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_vim-fib_mosaic.png"), 
+       width = 7.5, height = 6, dpi = "print")
+
+#### Flu per-subj stacked bar plot
+flu_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Influenza_tot >= 8],
+                tmr_pos == "flu") 
+
+ggplot(data = flu_mosaic, aes(x = subj, fill = pheno_cat)) +
+    geom_bar(position = "fill") +
+    labs(y = "", x = "Subject ", title='Flu-specific cells\nfrom subjects with \u2265 8 cells') +
+    scale_fill_manual("Aligned Cluster", values = all_tmr_zscore_anno_colors$group) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_flu_mosaic.png"), 
+       width = 7.5, height = 6, dpi = "print")
+
+
+```
+
+
+```{r subset_plot_data_by_disease_status}
+
+forTee_RA = forTee %>%
+  dplyr::filter(subj %in% phenos$subj[phenos$disease_status == "RA"])
+tmr_counting_RA = tmr_counting %>%
+  dplyr::filter(disease_status == "RA")
+
+forTee_HC = forTee %>%
+  dplyr::filter(subj %in% phenos$subj[phenos$disease_status == "HC"])
+tmr_counting_HC = tmr_counting %>%
+  dplyr::filter(disease_status == "HC")
+
+```
+
+
+```{r RA_only_mosaic_plots}
+## Mosaic plots for each tetramer
+# Reset ggplot defaults to match GLM figs
+theme_set(theme_classic(10) + 
+            theme(axis.title = element_text(size=10, face="bold"),
+                  axis.text.x = element_text(size=10, face="bold", color = "black"),
+                  axis.text.y = element_text(size=8, color = "black")))
+
+
+total_tmr_mosaic_RA = forTee_RA %>%
+  dplyr::filter( subj %in% tmr_by_subj$subject[(tmr_by_subj$Aggrecan_tot >= 8) |
+                                                (tmr_by_subj$Enolase_tot >= 8) |
+                                                (tmr_by_subj$Cilp_tot >= 8) |
+                                                (tmr_by_subj$Vimentin_Fibrinogen_tot >= 8) |
+                                                (tmr_by_subj$Influenza_tot >= 8)],
+                !(tmr_pos == "none" | tmr_pos == "flu"))
+
+
+ggplot(data = total_tmr_mosaic_RA %>% droplevels(), 
+       aes(x = pheno_cat, fill = specificity)) +
+  geom_bar(position = "fill") +
+  labs(y = "", x = "", title='Tmr+ phenotypes from RA subjects') +
+  scale_fill_manual("Specificity", values = c("#0D0887FF", "#9443A8FF", "#CC4678FF", "#F89441FF")) +
+  theme(plot.title = element_text(hjust = 0.5),
+  axis.text.y = element_blank(),
+  axis.ticks.y = element_blank())
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_summary_of_all_specs_all_RAsubj.png"), 
+       width = 4.5, height = 3, dpi = "print")
+
+
+## Establish order for specificity bar plot using clustering of % specificities per subject
+test_order = predominance_test %>% 
+  dplyr::select(subject, pct_agg:pct_vf) %>% 
+  column_to_rownames("subject") %>% 
+  as.matrix %>% 
+  Heatmap() %>% 
+  row_order()
+
+total_tmr_mosaic_RA_ordered = total_tmr_mosaic_RA %>% 
+  droplevels() %>%
+  mutate(subj = factor(subj, levels = predominance_test$subject[test_order]))
+
+# Plot per-subject mosaic, filled by specificity
+ggplot(data = total_tmr_mosaic_RA_ordered, 
+       aes(x = subj, fill = specificity)) +
+  geom_bar(position = "fill") +
+  labs(y = "", x = "", title='Tmr+ phenotypes from all RA subjects') +
+  scale_fill_manual("Specificity", values = c("#0D0887FF", "#9443A8FF", "#CC4678FF", "#F89441FF")) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_summary_of_all_specs_by_RAsubj_ordered.png"), 
+       width = 9, height = 6, dpi = "print")
+
+```
+
+
+```{r HC_only_mosaic_plots}
+## Mosaic plots for each tetramer
+# Reset ggplot defaults to match GLM figs
+theme_set(theme_classic(10) + 
+            theme(axis.title = element_text(size=10, face="bold"),
+                  axis.text.x = element_text(size=10, face="bold", color = "black"),
+                  axis.text.y = element_text(size=8, color = "black")))
+
+
+total_tmr_mosaic_HC = forTee_HC %>%
+  dplyr::filter( subj %in% tmr_by_subj$subject[(tmr_by_subj$Aggrecan_tot >= 8) |
+                                                (tmr_by_subj$Enolase_tot >= 8) |
+                                                (tmr_by_subj$Cilp_tot >= 8) |
+                                                (tmr_by_subj$Vimentin_Fibrinogen_tot >= 8) |
+                                                (tmr_by_subj$Influenza_tot >= 8)],
+                !(tmr_pos == "none" | tmr_pos == "flu"))
+
+ggplot(data = total_tmr_mosaic_HC %>% droplevels(), 
+       aes(x = pheno_cat, fill = specificity)) +
+  geom_bar(position = "fill") +
+  labs(y = "", x = "", title='Tmr+ phenotypes from HC subjects') +
+  scale_fill_manual("Specificity", values = c("#0D0887FF", "#9443A8FF", "#CC4678FF", "#F89441FF")) +
+  theme(plot.title = element_text(hjust = 0.5),
+  axis.text.y = element_blank(),
+  axis.ticks.y = element_blank())
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_summary_of_all_specs_all_HCsubj.png"), 
+       width = 4.5, height = 3, dpi = "print")
+
+# Plot per-subject mosaic, filled by specificity
+ggplot(data = total_tmr_mosaic_HC %>% droplevels(), 
+       aes(x = subj, fill = specificity)) +
+  geom_bar(position = "fill") +
+  labs(y = "", x = "", title='Tmr+ phenotypes from all HC subjects') +
+  scale_fill_manual("Specificity", values = c("#0D0887FF", "#9443A8FF", "#CC4678FF", "#F89441FF")) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_summary_of_all_specs_by_HCsubj.png"), 
+       width = 9, height = 6, dpi = "print")
+
+## Establish order for specificity bar plot using clustering of % specificities per subject
+predominance_test_hc = tmr_by_subj %>%
+  left_join(subj_disease, by = c("subject" = "subj")) %>%
+  dplyr::filter(disease == "HC") %>%
+  mutate(RA_tot = Aggrecan_tot + Cilp_tot + Enolase_tot + Vimentin_Fibrinogen_tot,
+         pct_agg = Aggrecan_tot/RA_tot,
+         pct_cilp = Cilp_tot/RA_tot,
+         pct_eno = Enolase_tot/RA_tot,
+         pct_vf = Vimentin_Fibrinogen_tot/RA_tot) 
+
+test_order_hc = predominance_test_hc %>% 
+  dplyr::select(subject, pct_agg:pct_vf) %>% 
+  column_to_rownames("subject") %>% 
+  as.matrix %>% 
+  Heatmap() %>% 
+  row_order()
+
+total_tmr_mosaic_HC_ordered = total_tmr_mosaic_HC %>% 
+  droplevels() %>%
+  mutate(subj = factor(subj, levels = predominance_test_hc$subject[test_order_hc]))
+
+# Plot per-subject mosaic, filled by specificity
+ggplot(data = total_tmr_mosaic_HC_ordered, 
+       aes(x = subj, fill = specificity)) +
+  geom_bar(position = "fill") +
+  labs(y = "", x = "", title='Tmr+ phenotypes from all HC subjects') +
+  scale_fill_manual("Specificity", values = c("#0D0887FF", "#9443A8FF", "#CC4678FF", "#F89441FF")) +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.x = element_text(size = 8, angle=45, hjust = 1))
+ggsave(filename = paste0(fname_prefix_mosaic, "EVEN_WIDTH_summary_of_all_specs_by_HCsubj_ordered.png"), 
+       width = 5.071429, height = 6, dpi = "print")
+
+```
+
+
+```{r fig_S5_box_and_dotplots}
+agg_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Aggrecan_tot >= 8],
+  tmr_pos == "agg")
+eno_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Enolase_tot >= 8],
+  tmr_pos == "eno")
+cilp_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Cilp_tot >= 8],
+  tmr_pos == "cilp")
+vf_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Vimentin_Fibrinogen_tot >= 8],
+  tmr_pos == "vf")
+flu_mosaic = forTee %>%
+  dplyr::filter(subj %in% tmr_by_subj$subject[tmr_by_subj$Influenza_tot >= 8],
+  tmr_pos == "flu")
+
+tmr_counting_agg_sub = tmr_counting %>%
+  dplyr::filter(subject %in% agg_mosaic$subj) %>%
+  left_join(tmr_by_subj %>% dplyr::select(subject, Aggrecan_tot))
+tmr_counting_cilp_sub = tmr_counting %>%
+  dplyr::filter(subject %in% cilp_mosaic$subj) %>%
+  left_join(tmr_by_subj %>% dplyr::select(subject, Cilp_tot))
+tmr_counting_eno_sub = tmr_counting %>%
+  dplyr::filter(subject %in% eno_mosaic$subj) %>%
+  left_join(tmr_by_subj %>% dplyr::select(subject, Enolase_tot))
+tmr_counting_vf_sub = tmr_counting %>%
+  dplyr::filter(subject %in% vf_mosaic$subj) %>%
+  left_join(tmr_by_subj %>% dplyr::select(subject, Vimentin_Fibrinogen_tot))
+tmr_counting_flu_sub = tmr_counting %>%
+  dplyr::filter(subject %in% flu_mosaic$subj) %>%
+  left_join(tmr_by_subj %>% dplyr::select(subject, Influenza_tot))
+tmr_counting_tot_sub = tmr_counting %>%
+  left_join(tmr_by_subj %>% dplyr::select(subject, Total))
+
+
+theme_set(theme_classic(10) + 
+            theme(axis.title = element_text(size=10, face="bold"),
+                  axis.text.x = element_text(size=10, face="bold", color = "black"),
+                  axis.text.y = element_text(size=8, color = "black")))
+
+## Aggrecan
+ggplot(data = tmr_counting_agg_sub, 
+       aes(x = metacluster, y = pct_agg*100)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_point(shape = 1,
+               position = position_jitter(width = 0.2), 
+               size = 1.5) +
+    labs(x = "Aligned Cluster", y = "% Aggrecan-specific\nT cells") +
+    scale_y_continuous(limits = c(NA,100))
+ggsave(paste(fname_prefix_dotplot, "Agg_distribution_RAonly.pdf", sep = "_"), 
+       width = 4.5, height = 3, dpi = "print")
+
+
+## CILP
+ggplot(data = tmr_counting_cilp_sub, 
+       aes(x = metacluster, y = pct_cilp*100)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_point(shape = 1,
+               position = position_jitter(width = 0.2), 
+               size = 1.5) +
+    labs(x = "Aligned Cluster", y = "% CILP-specific\nT cells") +
+    scale_y_continuous(limits = c(NA,100))
+ggsave(paste(fname_prefix_dotplot, "Cilp_distribution_RAonly.pdf", sep = "_"), 
+       width = 4.5, height = 3, dpi = "print")
+
+## Enolase
+ggplot(data = tmr_counting_eno_sub, 
+       aes(x = metacluster, y = pct_eno*100)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_point(shape = 1,
+               position = position_jitter(width = 0.2), 
+               size = 1.5) +
+    labs(x = "Aligned Cluster", y = "% Enolase-specific\nT cells") +
+    scale_y_continuous(limits = c(NA,100))
+ggsave(paste(fname_prefix_dotplot, "Eno_distribution_RAonly.pdf", sep = "_"), 
+       width = 4.5, height = 3, dpi = "print")
+
+
+## Vim+Fib
+ggplot(data = tmr_counting_vf_sub, 
+       aes(x = metacluster, y = pct_vf*100)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_point(shape = 1,
+               position = position_jitter(width = 0.2), 
+               size = 1.5) +
+    labs(x = "Aligned Cluster", y = "% Vim+Fib-specific\nT cells") +
+    scale_y_continuous(limits = c(NA,100))
+ggsave(paste(fname_prefix_dotplot, "VF_distribution_RAonly.pdf", sep = "_"), 
+       width = 4.5, height = 3, dpi = "print")
+
+
+## Flu
+ggplot(data = tmr_counting_flu_sub, 
+       aes(x = metacluster, y = pct_flu*100)) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_point(shape = 1,
+               position = position_jitter(width = 0.2), 
+               size = 1.5) +
+    labs(x = "Aligned Cluster", y = "% Influenza-specific\nT cells") +
+    scale_y_continuous(limits = c(NA,100))
+ggsave(paste(fname_prefix_dotplot, "Flu_distribution_RAonly.pdf", sep = "_"), 
+       width = 4.5, height = 3, dpi = "print")
+
+```
+
+
+##============================================
+## Hypergate to determine gating strategies for metaclusters
+##============================================
+
+
+```{r generate_plotting_strategy}
+library(hypergate)
+
+## Update plotting function for better viz
+library(scales)
+
+plot_gating_strategy = function (gate, xp, gate_vector, level, highlight = "black", 
+          path = "./", ...) 
+{
+  if (missing(path)) {
+    warning("path argument is missing, output won't be saved to file")
+  }
+  w = !is.na(gate_vector)
+  xp = xp[w, , drop = F]
+  gate_vector = gate_vector[w]
+  truce = gate_vector == level
+  parameters = gate$pars.history
+  active_parameters = gate$active_channels
+  parameters = parameters[, active_parameters, drop = FALSE]
+  if (nrow(parameters) > 1) {
+    parameters_order = apply(parameters, 2, function(x) min(which(x != 
+                                                                    x[1])))
+    parameters = parameters[, order(parameters_order, decreasing = FALSE), 
+                            drop = FALSE]
+  }
+  parameters = setNames(parameters[nrow(parameters), , drop = TRUE], 
+                        colnames(parameters))
+  channels = sub("_max", "", names(parameters))
+  channels = sub("_min", "", channels)
+  ranges.global = apply(xp[, channels, drop = F], 2, range)
+  rownames(ranges.global) = c("min", "max")
+  cols = rep("black", nrow(xp))
+  cols[gate_vector == level] = highlight
+  n = length(parameters)
+  active_events = rep(T, nrow(xp))
+  iter = 0
+  direction = rep(2, length(parameters))
+  direction[grep("_max", names(parameters))] = 1
+  for (i in seq(1, n, by = 2)) {
+    if ((i + 1) <= n) {
+      iter = iter + 1
+      if (!missing(path)) {
+        png(paste(path, iter, ".png", sep = ""), res = 300, height = 6, width = 6, units = "in", ...)
+      }
+      chan1 = channels[i]
+      chan2 = channels[i + 1]
+      plot(xp[active_events, chan1], 
+           xp[active_events, chan2], 
+           xlab = chan1, 
+           ylab = chan2, 
+           xlim = ranges.global[, chan1], 
+           ylim = ranges.global[, chan2], 
+           bty = "l", 
+           pch = 16, 
+           cex = 0.7, 
+           col = alpha(cols[active_events], 0.7))
+      segments(x0 = parameters[i], 
+               y0 = parameters[i + 1], 
+               x1 = ranges.global[direction[i], chan1], 
+               col = "red",
+               lwd = 2)
+      segments(x0 = parameters[i], 
+               y0 = parameters[i + 1], 
+               y1 = ranges.global[direction[i + 1], chan2], 
+               col = "red",
+               lwd = 2)
+      if (direction[i] == 2) {
+        test1 = xp[, chan1] >= parameters[i]
+      }
+      else {
+        test1 = xp[, chan1] <= parameters[i]
+      }
+      if (direction[i + 1] == 2) {
+        test2 = xp[, chan2] >= parameters[i + 1]
+      }
+      else {
+        test2 = xp[, chan2] <= parameters[i + 1]
+      }
+      active_events = active_events & test1 & test2
+      title(main = paste(paste(channels[1:(i + 1)], ifelse(direction[1:(i + 
+                                                                          1)] == 2, "+", "-"), sep = ""), collapse = ", "))
+      title(sub = paste("F=", signif(F_beta(truce, active_events), 
+                                     4), sep = ""))
+      if (!missing(path)) {
+        dev.off()
+      }
+    }
+  }
+  if (n%%2 == 1) {
+    iter = iter + 1
+    chan1 = channels[i]
+    if (!missing(path)) {
+      png(paste(path, iter, ".png", sep = ""), res = 300, height = 6, width = 6, units = "in", ...)
+    }
+    plot(xp[active_events, chan1], main = "", ylab = channels[i], 
+         xlab = "Events index", ylim = ranges.global[, chan1], 
+         bty = "l", pch = 16, cex = 0.7, col = alpha(cols[active_events], 0.7))
+    abline(h = parameters[i], col = "red", lwd = 2)
+    if (direction[i] == 2) {
+      test1 = xp[, chan1] >= parameters[i]
+    }
+    else {
+      test1 = xp[, chan1] <= parameters[i]
+    }
+    active_events = active_events & test1
+    title(main = paste(paste(channels[1:(i)], ifelse(direction[1:(i)] == 
+                                                       2, "+", "-"), sep = ""), collapse = ", "))
+    title(sub = paste("F=", signif(F_beta(truce, active_events), 
+                                   4), sep = ""))
+    if (!missing(path)) {
+      dev.off()
+    }
+  }
+}
+
+test_set = tmr_counting %>% 
+  dplyr::select(subject, metacluster, pct_CD4) %>% 
+  dplyr::filter(str_detect(subject, "1b_")) %>% 
+  spread(metacluster, pct_CD4, sep = "_") %>% 
+  rowwise() %>% 
+  mutate(min_coverage = min(metacluster_1, metacluster_2, metacluster_3, metacluster_4, 
+                            metacluster_5, metacluster_6, metacluster_7, metacluster_8)) %>%
+  arrange(desc(min_coverage)) %>%
+  .$subject %>%
+  .[1:5]
+
+events_w_metaclust = mergedExpr %>%
+  mutate(subj = samp,
+         samp = paste(subj, RPclust, sep = "_")) %>%
+  left_join(mc_assignments) %>%
+  # dplyr::filter(str_detect(subj, "^1b_"))
+  dplyr::filter(subj %in% test_set)
+
+# min_events = 2000
+min_events = min(table(events_w_metaclust$subj))
+
+ds_events = events_w_metaclust %>% 
+  group_by(subj) %>%
+  do((function(x) {
+    sample_idx <- sample(nrow(x), min_events)
+    ds_df <- x[sample_idx,]
+    return(ds_df)
+  })(.))
+  
+xp_mat = ds_events %>%
+  ungroup() %>%
+  dplyr::select(-c(samp:metacluster), -contains("Tmr")) %>%
+  #mutate_all(as.numeric) %>%
+  as.matrix()
+
+gate_vect = ds_events$metacluster
+
+create_gates = function(metaclust_of_interest){
+  default_path = paste0(fname_prefix_hgate, metaclust_of_interest)
+
+  metaclust_gate = hypergate(xp_mat, gate_vect, level = metaclust_of_interest)
+  saveRDS(metaclust_gate, file = paste0(default_path, "_hypergate_result.RDS"))
+
+  # Get an idea of how the initial gating performs
+  predicted = subset_matrix_hg(metaclust_gate, xp_mat)
+  print(table(ifelse(predicted, "Gated-in", "Gated-out"), 
+              ifelse(gate_vect == metaclust_of_interest, "Events of interest", "Others")))
+  cex = 10
+  
+  plot_gating_strategy(gate = metaclust_gate, 
+                       xp = xp_mat, 
+                       gate_vector = gate_vect, 
+                       level = metaclust_of_interest, 
+                       highlight = "firebrick3", 
+                       path = paste(default_path, "initial_strategy.png", sep = "_"))
+
+  # Look at progression of F values during optimization
+  f_values_vs_number_of_parameters = c(F_beta(rep(TRUE, nrow(xp_mat)), 
+      gate_vect == metaclust_of_interest), metaclust_gate$f[c(apply(metaclust_gate$pars.history[, 
+      metaclust_gate$active_channels], 2, function(x) min(which(x != 
+      x[1]))) - 1, nrow(metaclust_gate$pars.history))][-1])
+  
+  Fplot_df = data.frame(names = c("Initialization", paste("+ ", sep = "", metaclust_gate$active_channels)),
+                        f_values = f_values_vs_number_of_parameters) %>%
+    dplyr::arrange(desc(f_values)) %>%
+    mutate(names = factor(names, levels = names)) 
+    
+  ggplot(Fplot_df, aes(y = f_values, x = names)) +
+           geom_bar(stat="identity") + coord_flip() +
+    labs(y = "Cumulative F1-score", x = "")
+  ggsave(filename = paste(default_path, "Fplot.pdf", sep = "_"), height = 5, width = 7)
+  
+  # Look at contributions of each marker for optimization       
+  contributions = channels_contributions(gate = metaclust_gate, xp = xp_mat, gate_vector = gate_vect, 
+      level = metaclust_of_interest, beta = 1)
+
+  contrib_plot_df = data.frame(contributions) %>%
+    rownames_to_column(var = "name") %>%
+    dplyr::arrange(contributions) %>%
+    mutate(name = factor(name, levels = name)) 
+  
+  ggplot(contrib_plot_df, aes(y = contributions, x = name)) +
+           geom_bar(stat="identity") + coord_flip() +
+    labs(y = "F1-score deterioration when the parameter is ignored", x = "")
+  ggsave(filename = paste(default_path, "contrib_plot.pdf", sep = "_"), height = 5, width = 7)
+
+  # Refine initial gating
+  metaclust_gate_opt = reoptimize_strategy(gate = metaclust_gate,
+                                            channels_subset = as.character(contrib_plot_df$name[contrib_plot_df$contributions>0.001]),
+                                            xp = xp_mat,  gate_vector = gate_vect, level = metaclust_of_interest)
+
+  plot_gating_strategy(gate = metaclust_gate_opt, xp = xp_mat, gate_vector = gate_vect,
+      level = metaclust_of_interest, highlight = "firebrick3",
+      path = paste(default_path, "optimized_strategy.png", sep = "_"))
+
+}
+
+library(tictoc)
+tic()
+create_gates(1)
+toc()
+tic()
+create_gates(2)
+toc()
+tic()
+create_gates(3)
+toc()
+tic()
+create_gates(4)
+toc()
+tic()
+create_gates(5)
+toc()
+tic()
+create_gates(6)
+toc()
+tic()
+create_gates(7)
+toc()
+tic()
+create_gates(8)
+toc()
+
+```
+

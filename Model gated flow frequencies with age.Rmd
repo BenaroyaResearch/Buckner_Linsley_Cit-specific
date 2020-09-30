@@ -1,0 +1,252 @@
+---
+title: "HC vs RA marker frequency models"
+author: "Virginia S. Muir"
+date: "12/12/2018"
+output: pdf_document
+---
+
+Analysis goal
+------
+
+The primary goal of this analysis was to determine what CD4 markers vary between healthy control and rheumatoid arthritis subjects, after controlling for age.  While percent memory positive could be treated linearly (most values falling in the linear range from 20 - 80%), many of the other marker-positive cells were infrequent and, thus, outside of the percentage range where linear models are most appropriate.
+
+As such, frequency (percent marker positive) was modeled using a binomial approach.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(visreg)
+setwd("~/Box Sync/RA Cliff Metaclustering")
+```
+
+```{r load_data, include=FALSE}
+flow_data = read_excel("181019 Ex-vivo Data from FlowJo.xlsx", skip = 4, sheet = "MASTER EVERYTHING")
+
+flow_data = flow_data %>% 
+  dplyr::filter(str_detect(`Pass/Fail`, "^P\\/QC$")) %>% 
+  mutate(`Disease Status` = ifelse(`Disease Status` == "RA", "RA", "HC") %>% factor(),
+         `Age at Draw` = as.numeric(`Age at Draw`))
+
+mod_data = flow_data %>%
+  dplyr::select(subject = `Buckner ID`, disease = `Disease Status`, age = `Age at Draw`, 
+                sex = `Gender`, Memory:CXCR3, MemCCR4 = `Memory+ & CCR4+`, MemCCR6 = `Memory+ & CCR6+`,
+                MemCD38 = `Memory+ & CD38+`, MemCXCR3 = `Memory+ & CXCR3+`)
+
+```
+
+## Investigating marker-positive cells as a fraction of CD4+
+
+Memory
+------
+
+Memory+ cells are not significantly different between RA & HC subjects, unless age is removed from the model. (CD45 varies significantly with age, on its own.)
+
+
+```{r CD45RA_model, echo = F}
+mem_no_age = glm(Memory/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+mem_mod = glm(Memory/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_mod)[c("call", "coefficients")]
+```
+
+\newpage
+
+CCR4
+------
+
+CCR4+ cells are not significantly different between RA & HC subjects, unless age is removed from the model. (CCR4 varies significantly with age.)
+
+```{r CCR4_model, echo = F}
+ccr4_no_age = glm(CCR4/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(ccr4_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+ccr4_mod = glm(CCR4/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(ccr4_mod)[c("call", "coefficients")]
+```
+
+CCR6
+------
+
+CCR6+ cells are not significantly different between RA & HC subjects, with or without age incorporated in the model.
+
+```{r CCR6_model, echo = F}
+ccr6_no_age = glm(CCR6/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(ccr6_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+ccr6_mod = glm(CCR6/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(ccr6_mod)[c("call", "coefficients")]
+```
+
+\newpage
+
+CD38
+------
+
+CD38+ cells are significantly different between RA & HC subjects, with or without age incorporated in the model.  (Even though CD38 varies significantly with age.)
+
+```{r CD38_model, echo = F}
+cd38_no_age = glm(CD38/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(cd38_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+cd38_mod = glm(CD38/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(cd38_mod)[c("call", "coefficients")]
+```
+
+CXCR3
+------
+
+CXCR3+ cells are not significantly different between RA & HC subjects, with or without age incorporated in the model.
+
+```{r CXCR3_model, echo = F}
+cxcr3_no_age = glm(CXCR3/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(cxcr3_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+cxcr3_mod = glm(CXCR3/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(cxcr3_mod)[c("call", "coefficients")]
+```
+
+\newpage
+
+## Investigating marker-positive cells as a fraction of CD4+ Memory+ cells
+
+CCR4 of Memory
+------
+
+CCR4+ cells are not significantly different between RA & HC subjects, unless age is removed from the model. (CCR4 varies significantly with age.)
+
+```{r CCR4_memory_model, echo = F}
+mem_ccr4_no_age = glm(MemCCR4/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_ccr4_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+mem_ccr4_mod = glm(MemCCR4/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_ccr4_mod)[c("call", "coefficients")]
+
+## Visualization demo (if needed)
+# visreg(mem_ccr4_mod, 
+#        xvar = "disease", 
+#        ylim = range(mod_data$MemCCR4/100),
+#        rug = F, 
+#        scale = "response",
+#        gg = T) +
+#   geom_point(data = mod_data, aes(x = ifelse(disease == "HC", 0.225, 0.775), y = MemCCR4/100), 
+#              size = 2, alpha = 0.5, position = position_jitter(width = 0.1)) +
+#   labs(y = "% CCR4+ of Memory CD4+", x = "Disease Status") + 
+#   scale_y_continuous(labels = function(x) (x*100))
+
+```
+
+CCR6 of Memory
+------
+
+CCR6+ cells are not significantly different between RA & HC subjects, with or without age incorporated in the model.
+
+```{r CCR6_memory_model, echo = F}
+mem_ccr6_no_age = glm(MemCCR6/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_ccr6_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+mem_ccr6_mod = glm(MemCCR6/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_ccr6_mod)[c("call", "coefficients")]
+```
+
+\newpage
+
+CD38 of Memory
+------
+
+CD38+ cells are not significantly different between RA & HC subjects, with or without age incorporated in the model.
+
+```{r CD38_memory_model, echo = F}
+mem_cd38_no_age = glm(MemCD38/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_cd38_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+mem_cd38_mod = glm(MemCD38/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_cd38_mod)[c("call", "coefficients")]
+```
+
+CXCR3 of Memory
+------
+
+CXCR3+ cells are not significantly different between RA & HC subjects, with or without age incorporated in the model.
+
+```{r CXCR3_memory_model, echo = F}
+mem_cxcr3_no_age = glm(MemCXCR3/100 ~ 1 + disease,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_cxcr3_no_age)[c("call", "coefficients")]
+
+cat("  \n")
+
+mem_cxcr3_mod = glm(MemCXCR3/100 ~ 1 + disease + age,
+              family = quasibinomial(),
+              data = mod_data)
+
+summary(mem_cxcr3_mod)[c("call", "coefficients")]
+```
+
+
